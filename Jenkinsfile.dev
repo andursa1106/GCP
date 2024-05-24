@@ -1,0 +1,86 @@
+pipeline {
+    agent any
+ 
+    environment {
+        PROJECT_ID = 'devioz-pe-desa-analitica'
+        SRC_PATH = 'src'
+        ENVIRONMENT = 'dev'
+        GCP_SERVICE_ACCOUNT = 'devioz-pe-desa-analitica-gcp'
+        GCP_LOCATION = 'us-central1'
+        REPOSITORY = 'my-repositorio202424'  // Cambia esto al nombre del repositorio que desees
+        BUCKET_NAME = 'my-bucket202424'  // Cambia esto al nombre de tu bucket
+        REGION = 'us-central1'  // Cambia esto a la región que desees
+    }
+   
+    stages {
+        stage('Descarga de Fuentes') {
+            steps {
+                script {
+                    deleteDir()
+                    checkout scm
+                }
+            }
+        }
+ 
+        stage('Activando Service Account') {
+            steps {
+                withCredentials([file(credentialsId: "${GCP_SERVICE_ACCOUNT}", variable: 'SECRET_FILE')]) {
+                    sh """\$(gcloud auth activate-service-account --key-file=\$SECRET_FILE)"""
+                }
+            }
+        }
+ 
+        stage('Crear Repositorio') {
+            steps {
+                sh '''
+                gcloud artifacts repositories create ${REPOSITORY} \
+                    --repository-format=docker \
+                    --location=${GCP_LOCATION} || true
+                '''
+            }
+        }
+ 
+        stage('Configurar Autenticación Docker') {
+            steps {
+                sh '''
+                gcloud auth configure-docker ${GCP_LOCATION}-docker.pkg.dev
+                '''
+            }
+        }
+ 
+        stage('Construir Plantilla Flex') {
+            steps {
+                script {
+                    def imageGcrPath = "${GCP_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/getting-started-python:latest"
+                    sh """
+                    gcloud dataflow flex-template build gs://${BUCKET_NAME}/getting_started-py.json \
+                        --image-gcr-path "${imageGcrPath}" \
+                        --sdk-language "PYTHON" \
+                        --flex-template-base-image "PYTHON3" \
+                        --metadata-file "${SRC_PATH}/metadata.json" \
+                        --py-path "." \
+                        --env "FLEX_TEMPLATE_PYTHON_PY_FILE=${SRC_PATH}/pipeline_4.py" \
+                        --env "FLEX_TEMPLATE_PYTHON_REQUIREMENTS_FILE=${SRC_PATH}/requirements.txt" \
+                    """
+                }
+            }
+        }
+ 
+        stage('Ejecutar Plantilla Flex') {
+            steps {
+                script {
+                    def timestamp = sh(script: 'date +%Y%m%d-%H%M%S', returnStdout: true).trim()
+                    def templateFile = "gs://${BUCKET_NAME}/getting_started-py.json"
+                    sh """
+                    gcloud dataflow flex-template run "getting-started-${timestamp}" \
+                        --template-file-gcs-location "${templateFile}" \
+                        --parameters output="gs://${BUCKET_NAME}/output-" \
+                        --region "${REGION}"
+                        --service-acount-email "devioz-pe-desa-analitica-277@devioz-pe-desa-analitica.iam.gserviceaccount.com"
+                        --network "notebook-network"
+                    """
+                }
+            }
+        }
+    }
+}
